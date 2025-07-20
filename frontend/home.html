@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisuHall - Seleção de Pedidos</title>
+    <style>
+        :root {
+            --primary-color: #005f73;
+            --secondary-color: #0a9396;
+            --background-color: #f4f4f4;
+            --card-background: #ffffff;
+            --text-color: #333;
+            --light-text: #ffffff;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            margin: auto;
+        }
+        header {
+            background-color: var(--primary-color);
+            color: var(--light-text);
+            padding: 20px;
+            text-align: center;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 1.8em;
+        }
+        #order-list {
+            list-style: none;
+            padding: 0;
+        }
+        .order-item {
+            background-color: var(--card-background);
+            border-radius: 8px;
+            margin-bottom: 10px;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .order-item:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+        }
+        .order-details span {
+            display: block;
+            margin-bottom: 5px;
+        }
+        .order-id {
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+        .order-time, .order-items {
+            color: #777;
+            font-size: 0.9em;
+        }
+        .start-picking-btn {
+            background-color: var(--secondary-color);
+            color: var(--light-text);
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 1em;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Pedidos de Picking Pendentes</h1>
+    </header>
+    <ul id="order-list">
+        <!-- Pedidos serão inseridos aqui pelo JavaScript -->
+    </ul>
+    <div id="loading-message">Carregando pedidos...</div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', async () => {
+        const orderListEl = document.getElementById('order-list');
+        const loadingMessageEl = document.getElementById('loading-message');
+
+        try {
+            const response = await fetch('/api/picking_orders?status=pending');
+            const orders = await response.json();
+
+            loadingMessageEl.style.display = 'none';
+
+            if (orders.length === 0) {
+                orderListEl.innerHTML = '<p>Nenhum pedido pendente encontrado.</p>';
+                return;
+            }
+
+            orders.forEach(order => {
+                const listItem = document.createElement('li');
+                listItem.className = 'order-item';
+                listItem.onclick = () => {
+                    window.location.href = `/picking?order_id=${order.id}`;
+                };
+
+                const createdAt = new Date(order.created_at).toLocaleString('pt-BR');
+
+                listItem.innerHTML = `
+                    <div class="order-details">
+                        <span class="order-id">Pedido #${order.id}</span>
+                        <span class="order-items">${order.item_count} itens</span>
+                        <span class="order-time">Criado em: ${createdAt}</span>
+                    </div>
+                    <a href="/picking?order_id=${order.id}" class="start-picking-btn">Iniciar</a>
+                `;
+                orderListEl.appendChild(listItem);
+            });
+
+        } catch (error) {
+            console.error('Falha ao buscar pedidos:', error);
+            loadingMessageEl.textContent = 'Erro ao carregar pedidos. Tente novamente.';
+            loadingMessageEl.style.color = 'red';
+        }
+    });
+</script>
+
+</body>
+</html> 

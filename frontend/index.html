@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisuHall - Guia de Picking</title>
+    <style>
+        :root {
+            --primary-color: #005f73;
+            --secondary-color: #0a9396;
+            --background-color: #f4f4f4;
+            --card-background: #ffffff;
+            --text-color: #333;
+            --light-text: #ffffff;
+            --accent-color: #ee9b00;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--background-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background-color: var(--card-background);
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        header {
+            background-color: var(--primary-color);
+            color: var(--light-text);
+            padding: 20px;
+            text-align: center;
+        }
+        header h1 {
+            margin: 0;
+            font-size: 1.5em;
+        }
+        .item-display {
+            padding: 30px;
+            text-align: center;
+        }
+        .item-location {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: var(--secondary-color);
+            margin-bottom: 15px;
+        }
+        .item-name {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+        .item-sku, .item-quantity {
+            font-size: 1em;
+            color: #777;
+        }
+        .action-buttons {
+            display: flex;
+            justify-content: space-around;
+            padding: 20px;
+            border-top: 1px solid #eee;
+        }
+        .action-button {
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 1.1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background-color 0.3s, transform 0.1s;
+            width: 45%;
+        }
+        .action-button:active {
+            transform: scale(0.98);
+        }
+        #confirm-btn {
+            background-color: #2a9d8f;
+            color: var(--light-text);
+        }
+        #skip-btn {
+            background-color: #e9c46a;
+            color: #58410c;
+        }
+        .navigation {
+            display: flex;
+            justify-content: space-between;
+            padding: 20px;
+            border-top: 1px solid #eee;
+        }
+        .nav-button {
+            background-color: var(--secondary-color);
+            color: var(--light-text);
+            border: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .nav-button:hover {
+            background-color: #005f73;
+        }
+        .nav-button:disabled {
+            background-color: #94d2bd;
+            cursor: not-allowed;
+        }
+        .progress {
+            padding: 0 30px 20px;
+            text-align: center;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Guia de Picking</h1>
+    </header>
+    <main class="item-display">
+        <div id="loading">Carregando ordem de picking...</div>
+        <div id="picking-info" style="display: none;">
+            <div class="item-location" id="location">R00-R00X-L00-C00</div>
+            <div class="item-name" id="product-name">Nome do Produto</div>
+            <div class="item-sku">SKU: <span id="sku">SKU000</span></div>
+            <div class="item-quantity">Quantidade: <span id="quantity">0</span></div>
+        </div>
+    </main>
+    <div class="progress">
+        <span id="current-item-num">0</span> de <span id="total-items">0</span>
+    </div>
+    <footer class="action-buttons">
+        <button id="skip-btn" class="action-button">Pular Item</button>
+        <button id="confirm-btn" class="action-button">Confirmar</button>
+    </footer>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const urlParams = new URLSearchParams(window.location.search);
+        const orderId = urlParams.get('order_id'); 
+
+        if (!orderId) {
+            window.location.href = '/'; // Redireciona para a home se não houver ID
+            return;
+        }
+
+        let pickingList = [];
+        let currentIndex = -1;
+
+        const locationEl = document.getElementById('location');
+        const productNameEl = document.getElementById('product-name');
+        const skuEl = document.getElementById('sku');
+        const quantityEl = document.getElementById('quantity');
+        const confirmBtn = document.getElementById('confirm-btn');
+        const skipBtn = document.getElementById('skip-btn');
+        const loadingEl = document.getElementById('loading');
+        const infoEl = document.getElementById('picking-info');
+        const currentItemNumEl = document.getElementById('current-item-num');
+        const totalItemsEl = document.getElementById('total-items');
+
+        async function fetchPickingOrder() {
+            try {
+                loadingEl.style.display = 'block';
+                infoEl.style.display = 'none';
+                const response = await fetch(`/api/picking_orders/${orderId}`);
+                if (!response.ok) throw new Error('Falha ao buscar a ordem de picking.');
+                
+                const data = await response.json();
+                
+                // Envia os comandos iniciais para os LEDs
+                sendLedCommands(data.initial_led_commands);
+
+                pickingList = data.items.filter(item => item.status === 'pending');
+                
+                if (pickingList.length > 0) {
+                    currentIndex = 0;
+                    updateDisplay();
+                } else {
+                    showCompletionMessage();
+                }
+
+            } catch (error) {
+                console.error('Erro:', error);
+                showError(error.message);
+            }
+        }
+        
+        function updateDisplay() {
+            if (currentIndex < 0 || currentIndex >= pickingList.length) {
+                showCompletionMessage();
+                return;
+            }
+            
+            loadingEl.style.display = 'none';
+            infoEl.style.display = 'block';
+
+            const item = pickingList[currentIndex];
+            locationEl.textContent = item.location;
+            productNameEl.textContent = item.product_name;
+            skuEl.textContent = item.product_sku;
+            quantityEl.textContent = item.quantity;
+
+            // Usa a contagem total de itens que vem da API
+            const totalItems = pickingList[0]?.total_items || pickingList.length;
+            const pickedCount = totalItems - pickingList.length;
+            currentItemNumEl.textContent = pickedCount + currentIndex + 1;
+            totalItemsEl.textContent = totalItems;
+
+            // A lógica de enviar comando de LED individual sai daqui
+        }
+
+        function showCompletionMessage() {
+            locationEl.textContent = "Picking Concluído!";
+            productNameEl.textContent = "Todos os itens foram processados.";
+            infoEl.style.display = 'block';
+            loadingEl.style.display = 'none';
+            document.querySelector('.action-buttons').style.display = 'none';
+            currentItemNumEl.textContent = totalItemsEl.textContent;
+            // Ao final, envia um comando para apagar tudo
+            const resetCommands = ['S1_GREEN_OFF', 'S1_YELLOW_OFF', 'S2_GREEN_OFF', 'S2_YELLOW_OFF', 'S3_GREEN_OFF', 'S3_YELLOW_OFF', 'S4_GREEN_OFF', 'S4_YELLOW_OFF', 'S5_GREEN_OFF', 'S5_YELLOW_OFF'];
+            sendLedCommands(resetCommands);
+        }
+        
+        async function handleItemAction(status) {
+            if (currentIndex < 0 || currentIndex >= pickingList.length) return;
+
+            const item = pickingList[currentIndex];
+            try {
+                const response = await fetch(`/api/order_items/${item.id}/${status}`, { method: 'PUT' });
+                if (!response.ok) throw new Error(`Falha ao marcar item como ${status}.`);
+                
+                const data = await response.json();
+
+                // Backend agora envia a transição mínima. Frontend apenas executa.
+                await sendLedCommands(data.led_commands_off);
+                await sendLedCommands(data.led_commands_on);
+
+                // Atualiza a lista de pendentes no frontend
+                pickingList = pickingList.filter(p_item => p_item.id !== item.id);
+                
+                if (pickingList.length > 0) {
+                    currentIndex = 0;
+                    updateDisplay();
+                } else {
+                    showCompletionMessage();
+                }
+
+            } catch (error) {
+                console.error('Erro na ação do item:', error);
+                showError('Não foi possível atualizar o item.');
+            }
+        }
+        
+        function showError(message) {
+            loadingEl.textContent = `Erro: ${message}`;
+            loadingEl.style.color = 'red';
+        }
+        
+        // Função centralizada para enviar listas de comandos
+        async function sendLedCommands(commands) {
+            if (!commands || commands.length === 0) return;
+            try {
+                await fetch('/api/arduino/commands', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ commands: commands })
+                });
+            } catch (error) {
+                console.error('Falha ao enviar comandos para o Arduino:', error);
+            }
+        }
+        
+        confirmBtn.addEventListener('click', () => handleItemAction('picked'));
+        skipBtn.addEventListener('click', () => handleItemAction('skipped'));
+
+        fetchPickingOrder();
+    });
+</script>
+
+</body>
+</html> 

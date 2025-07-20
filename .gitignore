@@ -1,0 +1,21 @@
+# Ignorar o ambiente virtual do Python
+venv/
+/venv/
+
+# Ignorar o cache de bytecode do Python
+__pycache__/
+*.pyc
+
+# Ignorar arquivos de ambiente e segredos
+db.env
+*.env
+
+# Ignorar diretórios de configuração de editores
+.vscode/
+
+# Ignorar arquivos de log e sessões do VisuHall
+chats/
+*.log
+
+# Ignorar diretório de metadados do spec-runner
+.specstory/ 

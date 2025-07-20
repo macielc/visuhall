@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  webapp:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    devices:
+      # Mapeia o dispositivo serial CORRETO do Arduino para o contêiner
+      - "/dev/ttyUSB0:/dev/ttyUSB0"
+    # É necessário dar privilégios para o contêiner acessar dispositivos do host
+    privileged: true
+    # O devices e privileged não são mais necessários, pois a comunicação será via MQTT
+    # e não mais por serial direta nesta fase.
+    environment:
+      - DATABASE_URL=postgresql://visuhall_user:visuhall_pass@db:5432/visuhall_db
+      - MQTT_BROKER_HOST=mqtt
+    depends_on:
+      - db
+      - mqtt
+    env_file:
+      - ./db.env
+
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    env_file:
+      - ./db.env
+    # A porta do BD não precisa ser exposta ao host para a aplicação funcionar,
+    # apenas para acesso externo com ferramentas de depuração. 
+    # Comentando para evitar conflitos de porta.
+    # ports:
+    #   - "5432:5432"
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"  # Porta padrão do MQTT
+      - "9001:9001"  # Porta para WebSockets (útil para debug no navegador)
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+
+volumes:
+  postgres_data: 
