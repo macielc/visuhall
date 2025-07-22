@@ -152,9 +152,7 @@
             return;
         }
 
-        let pickingList = [];
-        let currentIndex = -1;
-
+        // CORREÇÃO: Declarar as constantes dos elementos do DOM
         const locationEl = document.getElementById('location');
         const productNameEl = document.getElementById('product-name');
         const skuEl = document.getElementById('sku');
@@ -166,122 +164,138 @@
         const currentItemNumEl = document.getElementById('current-item-num');
         const totalItemsEl = document.getElementById('total-items');
 
-        async function fetchPickingOrder() {
-            try {
-                loadingEl.style.display = 'block';
-                infoEl.style.display = 'none';
-                const response = await fetch(`/api/picking_orders/${orderId}`);
-                if (!response.ok) throw new Error('Falha ao buscar a ordem de picking.');
-                
-                const data = await response.json();
-                
-                // Envia os comandos iniciais para os LEDs
-                sendLedCommands(data.initial_led_commands);
+        let orderData = { items: [] };
 
-                pickingList = data.items.filter(item => item.status === 'pending');
-                
-                if (pickingList.length > 0) {
-                    currentIndex = 0;
-                    updateDisplay();
-                } else {
-                    showCompletionMessage();
-                }
+        // A FONTE DA VERDADE: SEMPRE ATUALIZADA A CADA AÇÃO
+        function processState() {
+            const pendingItems = orderData.items.filter(item => item.status !== 'picked' && item.status !== 'skipped');
 
-            } catch (error) {
-                console.error('Erro:', error);
-                showError(error.message);
-            }
-        }
-        
-        function updateDisplay() {
-            if (currentIndex < 0 || currentIndex >= pickingList.length) {
-                showCompletionMessage();
-                return;
+            if (pendingItems.length === 0) {
+                // ESTADO FINAL: PICKING CONCLUÍDO
+                locationEl.textContent = "Picking Concluído!";
+                productNameEl.textContent = "Todos os itens foram processados.";
+                infoEl.style.display = 'block';
+                loadingEl.style.display = 'none';
+                document.querySelector('.action-buttons').style.display = 'none';
+                currentItemNumEl.textContent = orderData.items.length;
+                totalItemsEl.textContent = orderData.items.length;
+            } else {
+                // ESTADO ATIVO: AINDA HÁ ITENS
+                const currentItem = pendingItems[0];
+                const pickedCount = orderData.items.length - pendingItems.length;
+
+                infoEl.style.display = 'block';
+                loadingEl.style.display = 'none';
+                locationEl.textContent = currentItem.location;
+                productNameEl.textContent = currentItem.product_name;
+                skuEl.textContent = currentItem.product_sku;
+                quantityEl.textContent = currentItem.quantity;
+                currentItemNumEl.textContent = pickedCount + 1;
+                totalItemsEl.textContent = orderData.items.length;
             }
             
-            loadingEl.style.display = 'none';
-            infoEl.style.display = 'block';
-
-            const item = pickingList[currentIndex];
-            locationEl.textContent = item.location;
-            productNameEl.textContent = item.product_name;
-            skuEl.textContent = item.product_sku;
-            quantityEl.textContent = item.quantity;
-
-            // Usa a contagem total de itens que vem da API
-            const totalItems = pickingList[0]?.total_items || pickingList.length;
-            const pickedCount = totalItems - pickingList.length;
-            currentItemNumEl.textContent = pickedCount + currentIndex + 1;
-            totalItemsEl.textContent = totalItems;
-
-            // A lógica de enviar comando de LED individual sai daqui
+            // CALCULA E ENVIA COMANDOS DE LUZ BASEADO NO ESTADO ATUAL
+            calculateAndSendLightCommands(pendingItems);
         }
 
-        function showCompletionMessage() {
-            locationEl.textContent = "Picking Concluído!";
-            productNameEl.textContent = "Todos os itens foram processados.";
-            infoEl.style.display = 'block';
-            loadingEl.style.display = 'none';
-            document.querySelector('.action-buttons').style.display = 'none';
-            currentItemNumEl.textContent = totalItemsEl.textContent;
-            // Ao final, envia um comando para apagar tudo
-            const resetCommands = ['S1_GREEN_OFF', 'S1_YELLOW_OFF', 'S2_GREEN_OFF', 'S2_YELLOW_OFF', 'S3_GREEN_OFF', 'S3_YELLOW_OFF', 'S4_GREEN_OFF', 'S4_YELLOW_OFF', 'S5_GREEN_OFF', 'S5_YELLOW_OFF'];
-            sendLedCommands(resetCommands);
+        function calculateAndSendLightCommands(pendingItems) {
+            const allRuasInOrder = [...new Set(orderData.items.map(item => item.rua).filter(rua => rua))];
+            let commands = [];
+
+            if (pendingItems.length === 0) {
+                // Ao final do picking, desliga todas as luzes que fizeram parte do pedido.
+                commands = allRuasInOrder.map(rua => `S${rua}_OFF`);
+            } else {
+                const activeRua = pendingItems[0].rua;
+                // Encontra todas as ruas únicas que ainda têm itens pendentes.
+                const pendingRuas = [...new Set(pendingItems.map(item => item.rua).filter(rua => rua))];
+
+                allRuasInOrder.forEach(rua => {
+                    if (pendingRuas.includes(rua)) {
+                        // Esta rua tem itens pendentes.
+                        if (rua === activeRua) {
+                            // É a rua atual, faz o LED piscar em verde.
+                            commands.push(`S${rua}_GREEN_BLINK`);
+                        } else {
+                            // É uma rua futura, deixa o LED amarelo aceso.
+                            commands.push(`S${rua}_YELLOW_ON`);
+                        }
+                    } else {
+                        // Os itens desta rua já foram coletados, desliga o LED.
+                        commands.push(`S${rua}_OFF`);
+                    }
+                });
+            }
+            // Envia a lista completa de comandos. O backend cuidará de filtrar o que pode ser executado.
+            sendLedCommands(commands);
         }
         
         async function handleItemAction(status) {
-            if (currentIndex < 0 || currentIndex >= pickingList.length) return;
+            const currentItem = orderData.items.find(item => item.status !== 'picked' && item.status !== 'skipped');
+            if (!currentItem) return;
 
-            const item = pickingList[currentIndex];
             try {
-                const response = await fetch(`/api/order_items/${item.id}/${status}`, { method: 'PUT' });
-                if (!response.ok) throw new Error(`Falha ao marcar item como ${status}.`);
-                
-                const data = await response.json();
+                // DESABILITA OS BOTÕES PARA EVITAR CLIQUES DUPLOS DURANTE A SINCRONIZAÇÃO
+                confirmBtn.disabled = true;
+                skipBtn.disabled = true;
 
-                // Backend agora envia a transição mínima. Frontend apenas executa.
-                await sendLedCommands(data.led_commands_off);
-                await sendLedCommands(data.led_commands_on);
-
-                // Atualiza a lista de pendentes no frontend
-                pickingList = pickingList.filter(p_item => p_item.id !== item.id);
-                
-                if (pickingList.length > 0) {
-                    currentIndex = 0;
-                    updateDisplay();
-                } else {
-                    showCompletionMessage();
+                // 1. SINCRONIZA COM O BACKEND E ESPERA A CONFIRMAÇÃO.
+                const response = await fetch(`/api/order_items/${currentItem.id}/${status}`, { method: 'PUT' });
+                if (!response.ok) {
+                    throw new Error('Falha ao sincronizar o status do item com o servidor.');
                 }
+
+                // 2. SOMENTE APÓS A CONFIRMAÇÃO, ATUALIZA O ESTADO LOCAL.
+                currentItem.status = status;
+
+                // 3. PROCESSA O NOVO ESTADO (ATUALIZA UI E LUZES).
+                processState();
 
             } catch (error) {
                 console.error('Erro na ação do item:', error);
-                showError('Não foi possível atualizar o item.');
+                showError('Erro de comunicação com o servidor.');
+            } finally {
+                // REABILITA OS BOTÕES APÓS A OPERAÇÃO
+                confirmBtn.disabled = false;
+                skipBtn.disabled = false;
             }
         }
         
-        function showError(message) {
-            loadingEl.textContent = `Erro: ${message}`;
-            loadingEl.style.color = 'red';
-        }
-        
-        // Função centralizada para enviar listas de comandos
         async function sendLedCommands(commands) {
             if (!commands || commands.length === 0) return;
             try {
-                await fetch('/api/arduino/commands', {
+                await fetch('/api/lights/commands', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ commands: commands })
                 });
             } catch (error) {
-                console.error('Falha ao enviar comandos para o Arduino:', error);
+                console.error('Falha ao enviar comandos de luz:', error);
             }
+        }
+
+        async function initialLoad() {
+            try {
+                loadingEl.style.display = 'block';
+                infoEl.style.display = 'none';
+                const response = await fetch(`/api/picking_orders/${orderId}`);
+                if (!response.ok) throw new Error('Falha ao buscar a ordem de picking.');
+                orderData = await response.json();
+                processState();
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function showError(message) {
+            loadingEl.textContent = `Erro: ${message}`;
+            loadingEl.style.color = 'red';
         }
         
         confirmBtn.addEventListener('click', () => handleItemAction('picked'));
         skipBtn.addEventListener('click', () => handleItemAction('skipped'));
 
-        fetchPickingOrder();
+        initialLoad();
     });
 </script>
 

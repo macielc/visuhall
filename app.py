@@ -1,12 +1,13 @@
 import os
 import re
 import time
-import serial
+# import serial <-- REMOVIDO
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import paho.mqtt.client as mqtt
 
 from models import Base, PickingOrder, OrderItem, Location, Product
 from routing import sort_picking_list
@@ -29,60 +30,80 @@ DATABASE_URL = f"postgresql://{db_user}:{db_password}@{db_host}:5432/{db_name}"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Criar tabelas no início
-Base.metadata.create_all(bind=engine)
+# Criar tabelas foi movido para seed_db.py para ser um passo de setup
+# Base.metadata.create_all(bind=engine)
 
-# --- Gerenciamento da Conexão Serial Persistente ---
-ser = None  # Objeto serial global
+# --- Configuração e Conexão MQTT ---
+MQTT_BROKER_HOST = os.getenv('MQTT_BROKER_HOST', 'mqtt')
+MQTT_PORT = 1883
+MQTT_CLIENT_ID = "visuhall_backend_server"
+TOTAL_RUAS_FISICAS = 2
 
-def init_serial():
-    """Inicializa a conexão serial e a mantém aberta."""
-    global ser
-    if ser and ser.is_open:
-        return
+mqtt_client = mqtt.Client(client_id=MQTT_CLIENT_ID)
+mqtt_client.reconnect_delay_set(min_delay=1, max_delay=120) # Define a reconexão automática
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("Conectado ao Broker MQTT com sucesso!")
+        client.is_connected_flag = True
+    else:
+        print(f"Falha ao conectar ao MQTT Broker, código de erro: {rc}")
+        client.is_connected_flag = False
+
+def on_disconnect(client, userdata, rc):
+    print(f"Desconectado do MQTT Broker com código: {rc}. Tentando reconectar...")
+    client.is_connected_flag = False
+
+def setup_mqtt():
+    mqtt_client.is_connected_flag = False
+    mqtt_client.on_connect = on_connect
+    mqtt_client.on_disconnect = on_disconnect
     try:
-        port = '/dev/ttyUSB0'
-        if os.name == 'nt': port = 'COM3'
-        ser = serial.Serial(port, 9600, timeout=1)
-        time.sleep(2)  # Espera o boot do Arduino, SÓ UMA VEZ.
-        print(f"Conexão serial com {port} estabelecida.")
-    except serial.SerialException as e:
-        ser = None
-        print(f"ALERTA: Não foi possível conectar ao Arduino. {e}")
+        mqtt_client.connect_async(MQTT_BROKER_HOST, MQTT_PORT, 60)
+        mqtt_client.loop_start()
+        print(f"Iniciando conexão com MQTT Broker em {MQTT_BROKER_HOST}:{MQTT_PORT}...")
+    except Exception as e:
+        print(f"ERRO CRÍTICO ao iniciar MQTT: {e}")
 
-# --- Dependência para obter a sessão do DB ---
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# --- Comunicação com Atuadores (via MQTT) ---
+def send_light_commands(commands):
+    """Espera a conexão MQTT estar ativa e então publica os comandos."""
+    # Espera até 5 segundos pela flag de conexão.
+    timeout = 5
+    start_time = time.time()
+    while not mqtt_client.is_connected_flag and time.time() - start_time < timeout:
+        print("Aguardando conexão MQTT...")
+        time.sleep(0.5)
 
-# --- Comunicação Serial com Arduino ---
-def send_commands_to_arduino(commands):
-    """Envia uma lista de comandos através da conexão serial persistente."""
-    global ser
-    if not commands:
-        return True
-    
-    if ser is None or not ser.is_open:
-        print("Tentando reconectar ao Arduino...")
-        init_serial() # Tenta reabrir a porta se estiver fechada
-        if ser is None:
-             print("Falha na reconexão. Comandos não enviados.")
-             return False
-
-    try:
-        for command in commands:
-            command_with_newline = f"{command}\n"
-            ser.write(command_with_newline.encode())
-            time.sleep(0.05)
-        return True
-    except serial.SerialException as e:
-        print(f"Erro ao enviar comando para o Arduino: {e}. Fechando a porta.")
-        ser.close()
-        ser = None
+    if not mqtt_client.is_connected_flag:
+        print("FALHA CRÍTICA: Conexão MQTT não estabelecida a tempo. Comandos não enviados.")
         return False
+    
+    print(f"Processando comandos de luz recebidos do frontend: {commands}")
+    
+    for command in commands:
+        try:
+            parts = command.split('_')
+            rua_part = parts[0]
+            light_command = "_".join(parts[1:])
+            
+            rua_id = int(re.findall(r'\d+', rua_part)[0])
+
+            # AQUI ESTÁ A LÓGICA DE SEGURANÇA:
+            # Só publica no tópico se a rua existir fisicamente.
+            if rua_id <= TOTAL_RUAS_FISICAS:
+                topic = f"visuhall/rua/{rua_id}/commands"
+                mqtt_client.publish(topic, light_command)
+                print(f"Publicado no tópico '{topic}': '{light_command}'")
+            else:
+                # Ignora silenciosamente o comando para ruas inexistentes.
+                # Opcional: logar que foi ignorado, se necessário para debug.
+                print(f"Comando '{command}' ignorado: Rua {rua_id} não possui atuador físico.")
+
+        except (IndexError, ValueError) as e:
+            print(f"Erro ao processar o comando '{command}': {e}")
+            
+    return True
 
 # --- Rotas do Frontend ---
 @app.route('/')
@@ -124,20 +145,53 @@ def get_picking_orders():
 def get_status():
     return jsonify({"status": "ok", "version": "1.1.0"})
 
-@app.route('/api/arduino/commands', methods=['POST'])
-def arduino_commands():
+# Rota para o frontend obter a lista de um pedido.
+# Não envia mais comandos de luz, apenas retorna os dados.
+@app.route('/api/picking_orders/<int:order_id>', methods=['GET'])
+def get_picking_order(order_id: int):
+    db = SessionLocal()
+    try:
+        order = db.query(PickingOrder).filter(PickingOrder.id == order_id).first()
+        if not order:
+            return jsonify({"error": "Ordem de picking não encontrada"}), 404
+        
+        order.items = sort_picking_list(order.items)
+        items_data = [{
+            "id": item.id, "product_sku": item.product.sku,
+            "product_name": item.product.name, "quantity": item.quantity,
+            "status": item.status, "location": item.location.get_address_str() if item.location else "N/A",
+            "rua": item.location.rua if item.location else None
+        } for item in order.items]
+            
+        return jsonify({
+            "id": order.id, "status": order.status, "items": items_data
+        })
+    finally:
+        db.close()
+
+TOTAL_RUAS = 2 # O número de ruas físicas com ESPs.
+
+# Rota para o frontend enviar comandos de luz.
+# Renomeada para clareza. Apenas executa.
+@app.route('/api/lights/commands', methods=['POST'])
+def light_commands():
     data = request.get_json()
-    commands = data.get('commands')
-    if not commands or not isinstance(commands, list):
-        return jsonify({"error": "Lista de comandos inválida."}), 400
-    send_commands_to_arduino(commands)
-    return jsonify({"message": f"{len(commands)} comandos enviados."})
+    commands = data.get('commands', [])
+    if not isinstance(commands, list):
+        return jsonify({"error": "Formato de comandos inválido. Esperava uma lista."}), 400
+
+    # Apenas repassa os comandos para a função de envio,
+    # que agora tem a lógica de segurança.
+    send_light_commands(commands)
+    
+    return jsonify({"message": "Comandos processados."})
 
 @app.route('/api/arduino/reset', methods=['POST'])
-def arduino_reset():
-    reset_commands = [f"S{i}_{color}_OFF" for i in range(1, 6) for color in ["GREEN", "YELLOW"]]
-    send_commands_to_arduino(reset_commands)
-    return jsonify({"message": "Comandos de reset enviados."})
+def light_reset():
+    # Desliga apenas as ruas que realmente existem.
+    reset_commands = [f"S{i}_OFF" for i in range(1, TOTAL_RUAS_FISICAS + 1)]
+    send_light_commands(reset_commands)
+    return jsonify({"message": "Comandos de reset enviados para todas as ruas físicas."})
 
 
 @app.route('/api/picking_orders/from_text', methods=['POST'])
@@ -200,62 +254,8 @@ def create_picking_order_from_text():
     finally:
         db.close()
 
-def calculate_led_state_map(order):
-    """
-    Calcula um mapa do estado de cada LED para a ordem atual.
-    Retorna um dicionário como {led_number: state}, onde state é 'GREEN_BLINK', 'YELLOW_ON', ou 'OFF'.
-    """
-    state_map = {i: 'OFF' for i in range(1, 6)}
-    pending_items = [item for item in order.items if item.status == 'pending' and item.location]
-    
-    if not pending_items:
-        return state_map
-
-    pending_ruas = sorted(list(set(item.location.rua for item in pending_items)))
-    active_rua = pending_ruas[0]
-
-    for rua in pending_ruas:
-        led_number = ((rua - 1) % 5) + 1
-        if rua == active_rua:
-            state_map[led_number] = 'GREEN_BLINK'
-        else:
-            state_map[led_number] = 'YELLOW_ON'
-    return state_map
-
-def map_to_commands(state_map):
-    """Converte um mapa de estado em uma lista de comandos de LED."""
-    commands = []
-    for led, state in state_map.items():
-        if state == 'GREEN_BLINK': commands.append(f"S{led}_GREEN_BLINK")
-        elif state == 'YELLOW_ON': commands.append(f"S{led}_YELLOW_ON")
-    return commands
-
-@app.route('/api/picking_orders/<int:order_id>', methods=['GET'])
-def get_picking_order(order_id: int):
-    db = SessionLocal()
-    try:
-        order = db.query(PickingOrder).filter(PickingOrder.id == order_id).first()
-        if not order:
-            return jsonify({"error": "Ordem de picking não encontrada"}), 404
-
-        state_map = calculate_led_state_map(order)
-        led_commands = map_to_commands(state_map)
-        
-        order.items = sort_picking_list(order.items)
-
-        items_data = [{
-            "id": item.id, "product_sku": item.product.sku,
-            "product_name": item.product.name, "quantity": item.quantity,
-            "status": item.status, "location": item.location.get_address_str() if item.location else "N/A"
-        } for item in order.items]
-            
-        return jsonify({
-            "id": order.id, "status": order.status, "items": items_data,
-            "initial_led_commands": led_commands 
-        })
-    finally:
-        db.close()
-
+# Rota para o frontend atualizar o status de um item no DB.
+# Não envia mais comandos de luz. Apenas salva no banco.
 @app.route('/api/order_items/<int:item_id>/<status>', methods=['PUT'])
 def update_item_status(item_id: int, status: str):
     db = SessionLocal()
@@ -266,47 +266,16 @@ def update_item_status(item_id: int, status: str):
         item = db.query(OrderItem).filter(OrderItem.id == item_id).first()
         if not item: return jsonify({"error": "Item não encontrado"}), 404
 
-        order = item.order
-        
-        # 1. Captura o estado dos LEDs ANTES da atualização
-        state_map_before = calculate_led_state_map(order)
-
-        # 2. ATUALIZA O STATUS DO ITEM
         item.status = status
         db.commit()
-        db.refresh(order)
 
-        # 3. Captura o estado dos LEDs DEPOIS da atualização
-        state_map_after = calculate_led_state_map(order)
-        
-        # 4. Compara os mapas para gerar a lista MÍNIMA de comandos
-        led_commands_off, led_commands_on = [], []
-        for led_num in range(1, 6):
-            state_before = state_map_before.get(led_num, 'OFF')
-            state_after = state_map_after.get(led_num, 'OFF')
-
-            if state_before != state_after:
-                # Se mudou, primeiro desliga o estado anterior (se não era OFF)
-                if state_before == 'GREEN_BLINK': led_commands_off.append(f"S{led_num}_GREEN_OFF")
-                elif state_before == 'YELLOW_ON': led_commands_off.append(f"S{led_num}_YELLOW_OFF")
-                
-                # Depois, liga o novo estado (se não for OFF)
-                if state_after == 'GREEN_BLINK': led_commands_on.append(f"S{led_num}_GREEN_BLINK")
-                elif state_after == 'YELLOW_ON': led_commands_on.append(f"S{led_num}_YELLOW_ON")
-
-        print(f"--- INTELLIGENT TRANSITION (item {item_id}) ---")
-        print(f"Commands OFF: {led_commands_off}")
-        print(f"Commands ON: {led_commands_on}")
-        print("---------------------------------")
-
-        return jsonify({
-            "message": f"Item {item_id} marcado como {status}.",
-            "led_commands_off": led_commands_off,
-            "led_commands_on": led_commands_on
-        })
+        return jsonify({"message": f"Item {item_id} marcado como {status}."})
     finally:
         db.close()
 
 if __name__ == '__main__':
-    init_serial() # Inicializa a porta serial ao iniciar o servidor
-    app.run(host='0.0.0.0', port=8000, debug=True) 
+    setup_mqtt() # Inicia a conexão MQTT ao iniciar o servidor
+    app.run(host='0.0.0.0', port=8000, debug=True)
+else:
+    # Quando rodando com Gunicorn, a conexão deve ser iniciada aqui
+    setup_mqtt() 
